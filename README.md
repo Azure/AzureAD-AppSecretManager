@@ -70,7 +70,7 @@ For more info on Azure Functions PowerShell folder structure and development gui
 ## How to deploy the solution
 **Step 1** - Deploy the solution via the Azure portal and provide the required information
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Ftimoleo23%2FAzureAD-AppSecretManager%2Fmain%2FDeployment%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FAzure%2FAzureAD-AppSecretManager%2Fmain%2FDeployment%2Fazuredeploy.json)
 
 __Note__: to get t he 'teamsChannelURL', go to Microsoft Teams and select the channel where the notifications will be sent. From there, cick on "Get link to channel" and paste the value in the Azure portal and ARM template deployment wizard.
 

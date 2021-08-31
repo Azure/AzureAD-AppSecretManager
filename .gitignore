@@ -1,0 +1,10 @@
+
+# Azure Functions artifacts
+bin
+obj
+appsettings.json
+local.settings*.json
+
+# Dev files
+.vscode
+*test*

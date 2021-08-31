@@ -1,0 +1,7 @@
+.git*
+.vscode
+local.settings*.json
+Deployment
+Media
+*.md
+*test*

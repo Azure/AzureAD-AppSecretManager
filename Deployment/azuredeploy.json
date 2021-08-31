@@ -1,0 +1,1096 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "resourcePrefix": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 11,
+            "metadata": {
+                "description": "Prefix to your Azure resourcecs names"
+            }
+        },
+        "gitRepoUrl": {
+            "type": "string",
+            "metadata": {
+                "description": "The URL to the GitHub repository to deploy."
+            },
+            "defaultValue": "https://github.com/timoleo23/secretManager.git"
+        },
+        "gitBranch": {
+            "type": "string",
+            "metadata": {
+                "description": "The branch of the GitHub repository to deploy."
+            },
+            "defaultValue": "main"
+        },
+        "teamsChannelURL": {
+            "type" : "string",
+            "metadata" : {
+                "description" : "Provide link to channel where notifications will be posted" 
+            }
+        },
+        "delayReminderDays": {
+            "type" : "int",
+            "metadata" : {
+                "description" : "Delay in days for the reminder (after the 1st notification for secrect near expiry)" 
+            },
+            "defaultValue": 15
+        },
+        "validityPeriodDays": {
+            "type" : "int",
+            "metadata" : {
+                "description" : "Delay in days for the secret validity period" 
+            },
+            "defaultValue": 180
+        }
+    },
+    "functions": [],
+    "variables": {
+        "randomize" : "[substring(uniqueString(resourceGroup().id),0,5)]",
+        "stoAccountName": "[concat('stoaccount',variables('randomize'))]",
+        "serverFarmName" : "[concat('AzSP-', parameters('resourcePrefix'),'-',variables('randomize'))]",
+        "functionAppName" : "[concat('AzFA-', parameters('resourcePrefix'),'-',variables('randomize'))]",
+        "keyVaultName" : "[concat('AzKV-', parameters('resourcePrefix'),'-',variables('randomize'))]",
+        "eventGridName" : "[concat('AzEG-', parameters('resourcePrefix'),'-',variables('randomize'))]",
+        "logicAppName" : "[concat('AzLA-', parameters('resourcePrefix'),'-',variables('randomize'))]",
+        "connectionNameTeams" : "AzLA-Connector-Teams",
+        "connectionNameKeyVault" : "AzLA-Connector-KeyVault",
+        "connectionNameEventGrid" : "AzLA-Connector-EventGrid",
+        "teamsChannelID": "[split(uriComponentToString(parameters('teamsChannelURL')),'/')[5]]",
+        "teamsGroupID" : "[substring(parameters('teamsChannelURL'), add(indexOf(parameters('teamsChannelURL'),'groupId='),8), 36)]"      
+    },
+    "resources": [
+        {
+            "name": "[variables('stoAccountName')]",
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2019-06-01",
+            "location": "[resourceGroup().location]",
+            "kind": "StorageV2",
+            "sku": {
+                "name": "Standard_LRS"
+            },
+            "properties": {
+                "supportsHttpsTrafficOnly": true,
+                "allowBlobPublicAccess" : true,
+                "allowSharedKeyAccess" : true,
+                "minimumTlsVersion" : "TLS1_2"
+            }            
+        },
+        {
+            "name": "[variables('serverFarmName')]",
+            "type": "Microsoft.Web/serverfarms",
+            "apiVersion": "2019-08-01",
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "Y1",
+                "tier": "Dynamic",
+                "size": "Y1",
+                "family": "Y",
+                "capacity": 0
+            },
+            "kind": "app",
+            "properties": {
+                "reserved": false
+            }
+        },
+        {
+            "name": "[variables('functionAppName')]",
+            "type": "Microsoft.Web/sites",
+            "apiVersion": "2019-08-01",
+            "location": "[resourceGroup().location]",
+            "kind": "functionapp",
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/serverfarms', variables('serverFarmName'))]",
+                "[resourceId('Microsoft.Storage/storageAccounts', variables('stoAccountName'))]"
+            ],
+            "identity" :{
+                "type" : "SystemAssigned"
+            },
+            "properties": {
+                "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('serverFarmName'))]",
+                "siteConfig": {
+                    "appSettings": [
+                        {
+                            "name": "AZURE_KEYVAULT_SECRET",
+                            "value": "TBD"
+                        },
+                        {
+                            "name": "AzureWebJobsStorage",
+                            "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', variables('stoAccountName'), ';EndpointSuffix=', environment().suffixes.storage, ';AccountKey=', listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('stoAccountName')), '2019-06-01').keys[0].value)]"
+                        },
+                        {
+                            "name": "FUNCTIONS_EXTENSION_VERSION",
+                            "value": "~3"
+                        },
+                        {
+                            "name": "FUNCTIONS_WORKER_RUNTIME",
+                            "value": "powershell"
+                        },
+                         {
+                            "name": "FUNCTIONS_WORKER_RUNTIME_VERSION",
+                            "value": "~7"
+                        }
+                    ],
+                    "httpsOnly": true,
+                    "clientAffinityEnabled": false
+                }
+            },
+            "resources": [
+                {
+                    "apiVersion": "2020-12-01",
+                    "name": "web",
+                    "type": "sourcecontrols",
+                    "condition": "[not(empty(parameters('gitRepoUrl')))]",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.Web/sites', variables('functionAppName'))]"
+                    ],
+                    "properties": {
+                        "RepoUrl": "[parameters('gitRepoUrl')]",
+                        "branch": "[parameters('gitBranch')]",
+                        "IsManualIntegration": true
+                    }
+                }
+            ]            
+        },     
+        {
+            "name": "[variables('keyVaultName')]",
+            "type": "Microsoft.KeyVault/vaults",
+            "apiVersion": "2019-09-01",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "enabledForDeployment": false,
+                "enabledForTemplateDeployment": false,
+                "enabledForDiskEncryption": false,
+                "tenantId": "[subscription().tenantId]",
+                "accessPolicies": [
+                    {
+                        "tenantId": "[subscription().tenantId]",
+                        "objectId": "[reference(resourceId('Microsoft.Web/sites', variables('functionAppName')), '2019-08-01', 'Full').identity.principalId]",
+                        "permissions": {
+                            "secrets": [
+                                "Get",
+                                "Set",
+                                "List"
+                            ]
+                        }
+                    }                  
+                ],
+                "sku": {
+                    "name": "standard",
+                    "family": "A"
+                }
+            },
+            "resources": [
+                {
+                    "type": "Microsoft.KeyVault/vaults/secrets",
+                    "name": "[concat(variables('keyVaultName'), '/SecretManager-AzFunc-Master-Code')]",
+                    "apiVersion": "2021-04-01-preview",
+                    "dependsOn": [
+                        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+                    ],
+                    "properties": {
+                        "value": "[listkeys(concat(resourceId('Microsoft.Web/sites', variables('functionAppName')), '/host/default/'),'2016-08-01').masterKey]",
+                        "contentType": "txt",
+                        "attributes": {
+                            "enabled": true
+                        }
+                    }
+                }
+            ],
+            "dependsOn" :[
+                "[resourceId('Microsoft.Web/sites', variables('functionAppName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.EventGrid/systemTopics",
+            "apiVersion": "2020-10-15-preview",
+            "name": "[variables('eventGridName')]",
+            "location": "[resourceGroup().location]",
+            "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+            ],
+            "properties": {
+                "source": "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+                "topicType": "microsoft.keyvault.vaults"
+            }
+        },  
+        {
+            "type": "Microsoft.EventGrid/systemTopics/eventSubscriptions",
+            "apiVersion": "2020-10-15-preview",
+            "name": "[concat(variables('eventGridName'), '/LogicApp')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.EventGrid/systemTopics', variables('eventGridName'))]"
+            ],
+            "properties": {
+                "destination": {
+                    "properties": {
+                        "maxEventsPerBatch": 1,
+                        "preferredBatchSizeInKilobytes": 64,
+                        "endpointUrl": "[listCallbackURL(concat(resourceId('Microsoft.Logic/workflows', variables('logicAppName')), '/triggers/manual'), '2019-05-01').value]"
+                    },
+                    "endpointType": "WebHook"
+                },
+                "filter": {
+                    "includedEventTypes": [
+                        "Microsoft.KeyVault.SecretNearExpiry"
+                    ]
+                },
+                "eventDeliverySchema": "CloudEventSchemaV1_0",
+                "retryPolicy": {
+                    "maxDeliveryAttempts": 30,
+                    "eventTimeToLiveInMinutes": 1440
+                }
+            }
+        },        
+        {
+            "name": "[variables('connectionNameTeams')]",
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "Microsoft Teams",
+                "api": {
+                    "name": "teams",
+                    "displayName": "Microsoft Teams",
+                    "description": "Microsoft Teams enables you to get all your content, tools and conversations in the Team workspace with Office 365.",
+                    "iconUri": "https://connectoricons-prod.azureedge.net/releases/v1.0.1505/1.0.1505.2520/teams/icon.png",
+                    "brandColor": "#4B53BC",
+                    "type": "Microsoft.Web/locations/managedApis",
+                    "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', 'teams')]"
+                }
+            }
+        },
+        {
+            "name": "[variables('connectionNameKeyVault')]",
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "Azure Key Vault",
+                "api": {
+                    "name": "keyvault",
+                    "displayName": "Azure Key Vault",
+                    "description": "Azure Key Vault is a service to securely store and access secrets.",
+                    "iconUri": "https://connectoricons-prod.azureedge.net/releases/v1.0.1503/1.0.1503.2513/keyvault/icon.png",
+                    "brandColor": "#0079d6",
+                    "type": "Microsoft.Web/locations/managedApis",
+                    "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', 'keyvault')]"
+                },
+                "parameterValues": {
+                    "token:TenantId": "[subscription().tenantId]",
+                    "token:grantType": "code",
+                    "vaultName": "[variables('keyVaultName')]"
+                }
+            },
+            "dependsOn" : [
+                "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+            ]
+        },
+        {
+            "name": "[variables('connectionNameEventGrid')]",
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "Azure Event Grid",
+                "api": {
+                    "name": "azureeventgrid",
+                    "displayName": "Azure Event Grid",
+                    "description": "Azure Event Grid is an eventing backplane that enables event based programing with pub/sub semantics and reliable distribution & delivery for all services in Azure as well as third parties.",
+                    "iconUri": "https://connectoricons-prod.azureedge.net/releases/v1.0.1495/1.0.1495.2491/azureeventgrid/icon.png",
+                    "brandColor": "#0072c6",
+                    "type": "Microsoft.Web/locations/managedApis",
+                    "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', 'azureeventgrid')]"
+                },
+                "parameterValues": {
+                    "token:TenantId": "[subscription().tenantId]",
+                    "token:grantType": "code"
+                }
+            },
+            "dependsOn" : [
+                "[resourceId('Microsoft.EventGrid/systemTopics', variables('eventGridName'))]"
+            ]
+        },
+        {
+            "name": "[variables('logicAppName')]",
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/schemas/2016-06-01/Microsoft.Logic.json",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        },
+                        "AzFunc-HostName": {
+                            "defaultValue": "[concat('https://', reference(resourceId('Microsoft.Web/sites', variables('functionAppName')), '2018-02-01').defaultHostName, '/')]",
+                            "type": "String"
+                        },
+                        "delayReminderDays": {
+                            "defaultValue": "[parameters('delayReminderDays')]",
+                            "type": "Int"
+                        },
+                        "validityPeriodDays": {
+                            "defaultValue": "[parameters('validityPeriodDays')]",
+                            "type": "Int"
+                        }
+                    },
+                    "triggers": {
+                        "manual": {
+                            "inputs": {
+                                "schema": {
+                                    "properties": {
+                                        "data": {
+                                            "properties": {
+                                                "EXP": {},
+                                                "Id": {
+                                                    "type": "string"
+                                                },
+                                                "NBF": {},
+                                                "ObjectName": {
+                                                    "type": "string"
+                                                },
+                                                "ObjectType": {
+                                                    "type": "string"
+                                                },
+                                                "VaultName": {
+                                                    "type": "string"
+                                                },
+                                                "Version": {
+                                                    "type": "string"
+                                                }
+                                            },
+                                            "type": "object"
+                                        },
+                                        "dataschema": {
+                                            "type": "string"
+                                        },
+                                        "id": {
+                                            "type": "string"
+                                        },
+                                        "source": {
+                                            "type": "string"
+                                        },
+                                        "specversion": {
+                                            "type": "string"
+                                        },
+                                        "subject": {
+                                            "type": "string"
+                                        },
+                                        "time": {
+                                            "type": "string"
+                                        },
+                                        "type": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            },
+                            "kind": "Http",
+                            "type": "Request"
+                        }
+                    },
+                    "actions": {
+                        "Get_Azure_Function_MasterKey_from_AzKV": {
+                            "runAfter": {},
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['keyvault']['connectionId']"
+                                    }
+                                },
+                                "method": "get",
+                                "path": "/secrets/@{encodeURIComponent('SecretManager-AzFunc-Master-Code')}/value"
+                            },
+                            "runtimeConfiguration": {
+                                "secureData": {
+                                    "properties": [
+                                        "outputs"
+                                    ]
+                                }
+                            }
+                        },
+                        "Get_admin_approval_in_Teams": {
+                            "runAfter": {
+                                "Parse_JSON_Get-AzWebSites": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ApiConnectionWebhook",
+                            "inputs": {
+                                "body": {
+                                    "body": {
+                                        "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"actions\": [\n        {\n            \"type\": \"Action.Submit\",\n            \"title\": \"Confirm\",\n            \"data\": {\n                \"result\": \"confirmed\"\n            }\n        },\n        {\n            \"type\": \"Action.Submit\",\n            \"title\": \"Remind me in @{parameters('delayReminderDays')} days\",\n            \"data\": {\n                \"result\": \"reported\"\n            }\n        },\n        {\n            \"type\": \"Action.Submit\",\n            \"title\": \"Cancel\",\n            \"data\": {\n                \"result\": \"cancelled\"\n            }\n        }\n    ],\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Your application secret will expire in 30 days\",\n            \"wrap\": true,\n            \"weight\": \"Bolder\",\n            \"color\": \"Attention\"\n        },\n        {\n            \"type\": \"FactSet\",\n            \"facts\": [\n                {\n                    \"title\": \"Vault\",\n                    \"value\": \"@{triggerBody()?['data']?['VaultName']}\"\n                },\n                {\n                    \"title\": \"Secret\",\n                    \"value\": \"@{triggerBody()?['data']?['ObjectName']}\"\n                },\n                {\n                    \"title\": \"Expiry date\",\n                    \"value\": \"@{addToTime('1970-01-01T00:00:00Z', triggerBody()?['data']?['EXP'], 'second', 'F')}\"\n                }\n            ]\n        },\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Here are the WebSites identifed using this secret\",\n            \"wrap\": true\n        },\n        {\n            \"type\": \"FactSet\",\n            \"facts\": @{body('Parse_JSON_Get-AzWebSites')}\n        },\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Please confirm to roll-out the new secret\",\n            \"wrap\": true,\n            \"weight\": \"Bolder\"\n        }\n    ]\n}",
+                                        "recipient": {
+                                            "channelId": "[variables('teamsChannelID')]",
+                                            "groupId": "[variables('teamsGroupID')]"
+                                        },
+                                        "updateMessage": "Thanks for your response! You'll receive a confirmation message very soon. "
+                                    },
+                                    "notificationUrl": "@{listCallbackUrl()}"
+                                },
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['teams']['connectionId']"
+                                    }
+                                },
+                                "path": "/v1.0/teams/conversation/gatherinput/poster/@{encodeURIComponent('Flow bot')}/location/@{encodeURIComponent('Channel')}/$subscriptions"
+                            }
+                        },
+                        "HTTP_Get-AzKVSecretTags": {
+                            "runAfter": {
+                                "Initialize_AzFunc-MasterKey": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Http",
+                            "inputs": {
+                                "body": {
+                                    "keyVaultName": "@{triggerBody()?['data']?['VaultName']}",
+                                    "secretName": "@{triggerBody()?['data']?['ObjectName']}",
+                                    "secretVersion": "@{triggerBody()?['data']?['Version']}"
+                                },
+                                "headers": {
+                                    "content-type": "application/json"
+                                },
+                                "method": "POST",
+                                "retryPolicy": {
+                                    "type": "none"
+                                },
+                                "uri": "@{parameters('AzFunc-HostName')}/api/Get-AzKVSecretTags?code=@{variables('AzFunc-MasterKey')}"
+                            },
+                            "runtimeConfiguration": {
+                                "secureData": {
+                                    "properties": [
+                                        "inputs"
+                                    ]
+                                }
+                            }
+                        },
+                        "HTTP_Get-AzWebSites": {
+                            "runAfter": {
+                                "Parse_JSON_Get-AzKVSecretTags": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Http",
+                            "inputs": {
+                                "body": {
+                                    "keyVaultName": "@{triggerBody()?['data']?['VaultName']}",
+                                    "secretName": "@{triggerBody()?['data']?['ObjectName']}"
+                                },
+                                "headers": {
+                                    "content-type": "application/json"
+                                },
+                                "method": "POST",
+                                "uri": "@{parameters('AzFunc-HostName')}/api/Get-AzWebSites?code=@{variables('AzFunc-MasterKey')}"
+                            },
+                            "runtimeConfiguration": {
+                                "secureData": {
+                                    "properties": [
+                                        "inputs"
+                                    ]
+                                }
+                            }
+                        },
+                        "Initialize_AzFunc-MasterKey": {
+                            "runAfter": {
+                                "Get_Azure_Function_MasterKey_from_AzKV": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "AzFunc-MasterKey",
+                                        "type": "string",
+                                        "value": "@body('Get_Azure_Function_MasterKey_from_AzKV')?['value']"
+                                    }
+                                ]
+                            }
+                        },
+                        "Parse_JSON_Get-AzKVSecretTags": {
+                            "runAfter": {
+                                "HTTP_Get-AzKVSecretTags": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('HTTP_Get-AzKVSecretTags')",
+                                "schema": {
+                                    "properties": {
+                                        "AAD_appObjectId": {
+                                            "type": "string"
+                                        },
+                                        "AAD_appSecretID": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "Parse_JSON_Get-AzWebSites": {
+                            "runAfter": {
+                                "HTTP_Get-AzWebSites": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('HTTP_Get-AzWebSites')",
+                                "schema": {
+                                    "items": {
+                                        "properties": {
+                                            "title": {
+                                                "type": "string"
+                                            },
+                                            "value": {
+                                                "type": "string"
+                                            }
+                                        },
+                                        "type": "object"
+                                    },
+                                    "type": "array"
+                                }
+                            }
+                        },
+                        "Switch_based_on_admin_response": {
+                            "runAfter": {
+                                "Get_admin_approval_in_Teams": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "cases": {
+                                "Case_Cancelled": {
+                                    "case": "cancelled",
+                                    "actions": {
+                                        "Cancellation_confirmed": {
+                                            "runAfter": {},
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "body": {
+                                                    "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Rotation operation for secret @{triggerBody()?['data']?['ObjectName']} has been cancelled - Your Azure AD application secret will expire on @{addToTime('1970-01-01T00:00:00Z', triggerBody()?['data']?['EXP'], 'second', 'F')} if you don't take any action\",\n            \"wrap\": true,\n            \"weight\": \"bolder\",\n            \"color\": \"attention\"\n        }\n    ]\n}",
+                                                    "recipient": {
+                                                        "channelId": "[variables('teamsChannelID')]",
+                                                        "groupId": "[variables('teamsGroupID')]"
+                                                    }
+                                                },
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['teams']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                            }
+                                        }
+                                    }
+                                },
+                                "Case_Confirmed": {
+                                    "case": "confirmed",
+                                    "actions": {
+                                        "HTTP_New-GenerateAppSecret": {
+                                            "runAfter": {},
+                                            "type": "Http",
+                                            "inputs": {
+                                                "body": {
+                                                    "keyVaultName": "@{triggerBody()?['data']?['VaultName']}",
+                                                    "objectId": "@{body('Parse_JSON_Get-AzKVSecretTags')?['AAD_appObjectId']}",
+                                                    "secretName": "@{triggerBody()?['data']?['ObjectName']}",
+                                                    "validityPeriodDays": "@parameters('validityPeriodDays')"
+                                                },
+                                                "headers": {
+                                                    "content-type": "application/json"
+                                                },
+                                                "method": "POST",
+                                                "uri": "@{parameters('AzFunc-HostName')}/api/New-GenerateAppSecret?code=@{variables('AzFunc-MasterKey')}"
+                                            },
+                                            "runtimeConfiguration": {
+                                                "secureData": {
+                                                    "properties": [
+                                                        "inputs"
+                                                    ]
+                                                }
+                                            }
+                                        },
+                                        "Verify_HTTP_status_code_1": {
+                                            "actions": {
+                                                "HTTP_Update-AzKVSecret": {
+                                                    "runAfter": {
+                                                        "Parse_JSON_New-GenerateAppSecret": [
+                                                            "Succeeded"
+                                                        ]
+                                                    },
+                                                    "type": "Http",
+                                                    "inputs": {
+                                                        "body": {
+                                                            "keyVaultName": "@{triggerBody()?['data']?['VaultName']}",
+                                                            "secretName": "@{triggerBody()?['data']?['ObjectName']}",
+                                                            "secretVersion": "@{body('Parse_JSON_New-GenerateAppSecret')['AzKV_secretVersion']}"
+                                                        },
+                                                        "headers": {
+                                                            "content-type": "application/json"
+                                                        },
+                                                        "method": "POST",
+                                                        "uri": "@{parameters('AzFunc-HostName')}/api/Update-AzKVSecret?code=@{variables('AzFunc-MasterKey')}"
+                                                    },
+                                                    "runtimeConfiguration": {
+                                                        "secureData": {
+                                                            "properties": [
+                                                                "inputs"
+                                                            ]
+                                                        }
+                                                    }
+                                                },
+                                                "Parse_JSON_New-GenerateAppSecret": {
+                                                    "runAfter": {
+                                                        "Post_New_secret_roll-out_status_in_Teams_1": [
+                                                            "Succeeded"
+                                                        ]
+                                                    },
+                                                    "type": "ParseJson",
+                                                    "inputs": {
+                                                        "content": "@body('HTTP_New-GenerateAppSecret')",
+                                                        "schema": {
+                                                            "properties": {
+                                                                "AAD_appSecretID": {
+                                                                    "type": "string"
+                                                                },
+                                                                "AzKV_secretVersion": {
+                                                                    "type": "string"
+                                                                },
+                                                                "Status": {
+                                                                    "type": "string"
+                                                                }
+                                                            },
+                                                            "required": [
+                                                                "AzKV_secretVersion"
+                                                            ],
+                                                            "type": "object"
+                                                        }
+                                                    }
+                                                },
+                                                "Post_New_secret_roll-out_status_in_Teams_1": {
+                                                    "runAfter": {},
+                                                    "type": "ApiConnection",
+                                                    "inputs": {
+                                                        "body": {
+                                                            "messageBody": "{\n  \"type\": \"AdaptiveCard\",\n  \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n  \"version\": \"1.2\",\n  \"body\": [\n   {\n      \"type\": \"TextBlock\",\n          \"text\": \"Job's done! Secret renewed.\",\n          \"size\": \"large\",\n\"weight\":\"bolder\"\n    },\n        {\n      \"type\": \"TextBlock\",\n          \"text\": \"Secret @{triggerBody()?['data']?['ObjectName']} of Azure KeyVault @{triggerBody()?['data']?['VaultName']} will be automatically renewed **in the next 24 hours**.\",\n          \"wrap\": true\n        }\n  ]\n}",
+                                                            "recipient": {
+                                                                "channelId": "[variables('teamsChannelID')]",
+                                                                "groupId": "[variables('teamsGroupID')]"
+                                                            }
+                                                        },
+                                                        "host": {
+                                                            "connection": {
+                                                                "name": "@parameters('$connections')['teams']['connectionId']"
+                                                            }
+                                                        },
+                                                        "method": "post",
+                                                        "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                                    }
+                                                }
+                                            },
+                                            "runAfter": {
+                                                "HTTP_New-GenerateAppSecret": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "else": {
+                                                "actions": {
+                                                    "Post_Error_message_-_renewal_fail_1": {
+                                                        "runAfter": {},
+                                                        "type": "ApiConnection",
+                                                        "inputs": {
+                                                            "body": {
+                                                                "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"An Error happened during the renewal of your Azure AD application secret - Please check your Azure Logic App flow for more details\",\n            \"wrap\": true,\n            \"weight\": \"bolder\",\n            \"color\": \"attention\"\n        }\n    ]\n}",
+                                                                "recipient": {
+                                                                    "channelId": "[variables('teamsChannelID')]",
+                                                                    "groupId": "[variables('teamsGroupID')]"
+                                                                }
+                                                            },
+                                                            "host": {
+                                                                "connection": {
+                                                                    "name": "@parameters('$connections')['teams']['connectionId']"
+                                                                }
+                                                            },
+                                                            "method": "post",
+                                                            "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "expression": {
+                                                "and": [
+                                                    {
+                                                        "equals": [
+                                                            "@outputs('HTTP_New-GenerateAppSecret')['statusCode']",
+                                                            200
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            "type": "If"
+                                        }
+                                    }
+                                },
+                                "Case_Reported": {
+                                    "case": "reported",
+                                    "actions": {
+                                        "Get_admin_approval_in_Teams_after_reminder_delay": {
+                                            "runAfter": {
+                                                "delayReminderDays": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "ApiConnectionWebhook",
+                                            "inputs": {
+                                                "body": {
+                                                    "body": {
+                                                        "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"actions\": [\n        {\n            \"type\": \"Action.Submit\",\n            \"title\": \"Confirm\",\n            \"data\": {\n                \"result\": \"confirmed\"\n            }\n        },\n        {\n            \"type\": \"Action.Submit\",\n            \"title\": \"Cancel\",\n            \"data\": {\n                \"result\": \"cancelled\"\n            }\n        }\n    ],\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Your application secret will expire in @{sub(30,15)} days\",\n            \"wrap\": true,\n            \"weight\": \"Bolder\",\n            \"color\": \"Attention\"\n        },\n        {\n            \"type\": \"FactSet\",\n            \"facts\": [\n                {\n                    \"title\": \"Vault\",\n                    \"value\": \"@{triggerBody()?['data']?['VaultName']}\"\n                },\n                {\n                    \"title\": \"Secret\",\n                    \"value\": \"@{triggerBody()?['data']?['ObjectName']}\"\n                },\n                {\n                    \"title\": \"Expiry date\",\n                    \"value\": \"@{addToTime('1970-01-01T00:00:00Z', triggerBody()?['data']?['EXP'], 'second', 'F')}\"\n                }\n            ]\n        },\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Here are the WebSites identifed using this secret\",\n            \"wrap\": true\n        },\n        {\n            \"type\": \"FactSet\",\n            \"facts\": @{body('Parse_JSON_Get-AzWebSites')}\n        },\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Please confirm to roll-out the new secret\",\n            \"wrap\": true,\n            \"weight\": \"Bolder\"\n        }\n    ]\n}",
+                                                        "recipient": {
+                                                            "channelId": "[variables('teamsChannelID')]",
+                                                            "groupId": "[variables('teamsGroupID')]"
+                                                        },
+                                                        "updateMessage": "Thanks for your response! You'll receive a confirmation message very soon. "
+                                                    },
+                                                    "notificationUrl": "@{listCallbackUrl()}"
+                                                },
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['teams']['connectionId']"
+                                                    }
+                                                },
+                                                "path": "/v1.0/teams/conversation/gatherinput/poster/Flow bot/location/@{encodeURIComponent('Channel')}/$subscriptions"
+                                            }
+                                        },
+                                        "Post_Reminder_confirmation_after_delayReminderDays_days": {
+                                            "runAfter": {},
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "body": {
+                                                    "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"You will be reminded to renew secret @{triggerBody()?['data']?['ObjectName']} of Azure KeyVault @{triggerBody()?['data']?['VaultName']} in @{parameters('delayReminderDays')} days\",\n            \"wrap\": true\n        }\n    ]\n}",
+                                                    "recipient": {
+                                                        "channelId": "[variables('teamsChannelID')]",
+                                                        "groupId": "[variables('teamsGroupID')]"
+                                                    }
+                                                },
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['teams']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                            }
+                                        },
+                                        "delayReminderDays": {
+                                            "runAfter": {
+                                                "Post_Reminder_confirmation_after_delayReminderDays_days": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "Wait",
+                                            "inputs": {
+                                                "interval": {
+                                                    "count": "@parameters('delayReminderDays')",
+                                                    "unit": "Day"
+                                                }
+                                            }
+                                        },
+                                        "Switch_based_on_admin_response_after_reminder_delay": {
+                                            "runAfter": {
+                                                "Get_admin_approval_in_Teams_after_reminder_delay": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "cases": {
+                                                "Case_Cancelled": {
+                                                    "case": "cancelled",
+                                                    "actions": {
+                                                        "Cancellation_confirmed_after_reminder_delay": {
+                                                            "runAfter": {},
+                                                            "type": "ApiConnection",
+                                                            "inputs": {
+                                                                "body": {
+                                                                    "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"Rotation operation for secret @{triggerBody()?['data']?['ObjectName']} has been cancelled - Your Azure AD application secret will expire on @{addToTime('1970-01-01T00:00:00Z', triggerBody()?['data']?['EXP'], 'second', 'F')} if you don't take any action\",\n            \"wrap\": true,\n            \"weight\": \"bolder\",\n            \"color\": \"attention\"\n        }\n    ]\n}",
+                                                                    "recipient": {
+                                                                        "channelId": "[variables('teamsChannelID')]",
+                                                                        "groupId": "[variables('teamsGroupID')]"
+                                                                    }
+                                                                },
+                                                                "host": {
+                                                                    "connection": {
+                                                                        "name": "@parameters('$connections')['teams']['connectionId']"
+                                                                    }
+                                                                },
+                                                                "method": "post",
+                                                                "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                "Case_Confirmed": {
+                                                    "case": "confirmed",
+                                                    "actions": {
+                                                        "HTTP_New-GenerateAppSecret_after_reminder_delay": {
+                                                            "runAfter": {},
+                                                            "type": "Http",
+                                                            "inputs": {
+                                                                "body": {
+                                                                    "keyVaultName": "@{triggerBody()?['data']?['VaultName']}",
+                                                                    "objectId": "@{body('Parse_JSON_Get-AzKVSecretTags')?['AAD_appObjectId']}",
+                                                                    "secretName": "@{triggerBody()?['data']?['ObjectName']}",
+                                                                    "validityPeriodDays": "@parameters('validityPeriodDays')"
+                                                                },
+                                                                "headers": {
+                                                                    "content-type": "application/json"
+                                                                },
+                                                                "method": "POST",
+                                                                "uri": "@{parameters('AzFunc-HostName')}/api/New-GenerateAppSecret?code=@{variables('AzFunc-MasterKey')}"
+                                                            },
+                                                            "runtimeConfiguration": {
+                                                                "secureData": {
+                                                                    "properties": [
+                                                                        "inputs"
+                                                                    ]
+                                                                }
+                                                            }
+                                                        },
+                                                        "Verify_HTTP_status_code_2": {
+                                                            "actions": {
+                                                                "HTTP_Update-AzKVSecret_after_reminder_delay": {
+                                                                    "runAfter": {
+                                                                        "Parse_JSON_New-GenerateAppSecret_after_reminder_delay": [
+                                                                            "Succeeded"
+                                                                        ]
+                                                                    },
+                                                                    "type": "Http",
+                                                                    "inputs": {
+                                                                        "body": {
+                                                                            "keyVaultName": "@{triggerBody()?['data']?['VaultName']}",
+                                                                            "secretName": "@{triggerBody()?['data']?['ObjectName']}",
+                                                                            "secretVersion": "@{body('Parse_JSON_New-GenerateAppSecret_after_reminder_delay')['AzKV_secretVersion']}"
+                                                                        },
+                                                                        "headers": {
+                                                                            "content-type": "application/json"
+                                                                        },
+                                                                        "method": "POST",
+                                                                        "uri": "@{parameters('AzFunc-HostName')}/api/Update-AzKVSecret?code=@{variables('AzFunc-MasterKey')}"
+                                                                    },
+                                                                    "runtimeConfiguration": {
+                                                                        "secureData": {
+                                                                            "properties": [
+                                                                                "inputs"
+                                                                            ]
+                                                                        }
+                                                                    }
+                                                                },
+                                                                "Parse_JSON_New-GenerateAppSecret_after_reminder_delay": {
+                                                                    "runAfter": {
+                                                                        "Post_New_secret_roll-out_status_in_Teams_2": [
+                                                                            "Succeeded"
+                                                                        ]
+                                                                    },
+                                                                    "type": "ParseJson",
+                                                                    "inputs": {
+                                                                        "content": "@body('HTTP_New-GenerateAppSecret_after_reminder_delay')",
+                                                                        "schema": {
+                                                                            "properties": {
+                                                                                "AAD_appSecretID": {
+                                                                                    "type": "string"
+                                                                                },
+                                                                                "AzKV_secretVersion": {
+                                                                                    "type": "string"
+                                                                                },
+                                                                                "Status": {
+                                                                                    "type": "string"
+                                                                                }
+                                                                            },
+                                                                            "required": [
+                                                                                "AzKV_secretVersion"
+                                                                            ],
+                                                                            "type": "object"
+                                                                        }
+                                                                    }
+                                                                },
+                                                                "Post_New_secret_roll-out_status_in_Teams_2": {
+                                                                    "runAfter": {},
+                                                                    "type": "ApiConnection",
+                                                                    "inputs": {
+                                                                        "body": {
+                                                                            "messageBody": "{\n  \"type\": \"AdaptiveCard\",\n  \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n  \"version\": \"1.2\",\n  \"body\": [\n   {\n      \"type\": \"TextBlock\",\n          \"text\": \"Job's done! Secret renewed.\",\n          \"size\": \"large\",\n\"weight\":\"bolder\"\n    },\n        {\n      \"type\": \"TextBlock\",\n          \"text\": \"Secret @{triggerBody()?['data']?['ObjectName']} of Azure KeyVault @{triggerBody()?['data']?['VaultName']} will be automatically renewed **in the next 24 hours**.\",\n          \"wrap\": true\n        }\n  ]\n}",
+                                                                            "recipient": {
+                                                                                "channelId": "[variables('teamsChannelID')]",
+                                                                                "groupId": "[variables('teamsGroupID')]"
+                                                                            }
+                                                                        },
+                                                                        "host": {
+                                                                            "connection": {
+                                                                                "name": "@parameters('$connections')['teams']['connectionId']"
+                                                                            }
+                                                                        },
+                                                                        "method": "post",
+                                                                        "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                                                    }
+                                                                }
+                                                            },
+                                                            "runAfter": {
+                                                                "HTTP_New-GenerateAppSecret_after_reminder_delay": [
+                                                                    "Succeeded"
+                                                                ]
+                                                            },
+                                                            "else": {
+                                                                "actions": {
+                                                                    "Post_Error_message_-_renewal_fail_2": {
+                                                                        "runAfter": {},
+                                                                        "type": "ApiConnection",
+                                                                        "inputs": {
+                                                                            "body": {
+                                                                                "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"An Error happened during the renewal of your Azure AD application secret - Please check your Azure Logic App flow for more details\",\n            \"wrap\": true,\n            \"weight\": \"bolder\",\n            \"color\": \"attention\"\n        }\n    ]\n}",
+                                                                                "recipient": {
+                                                                                    "channelId": "[variables('teamsChannelID')]",
+                                                                                    "groupId": "[variables('teamsGroupID')]"
+                                                                                }
+                                                                            },
+                                                                            "host": {
+                                                                                "connection": {
+                                                                                    "name": "@parameters('$connections')['teams']['connectionId']"
+                                                                                }
+                                                                            },
+                                                                            "method": "post",
+                                                                            "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            "expression": {
+                                                                "and": [
+                                                                    {
+                                                                        "equals": [
+                                                                            "@outputs('HTTP_New-GenerateAppSecret_after_reminder_delay')['statusCode']",
+                                                                            200
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            },
+                                                            "type": "If"
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "default": {
+                                                "actions": {
+                                                    "Post_Error_message_default_2": {
+                                                        "runAfter": {},
+                                                        "type": "ApiConnection",
+                                                        "inputs": {
+                                                            "body": {
+                                                                "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"An Error happened - We didn't understand your answer - Please check your Azure Logic App flow for more details\",\n            \"wrap\": true,\n            \"weight\": \"bolder\",\n            \"color\": \"attention\"\n        }\n    ]\n}",
+                                                                "recipient": {
+                                                                    "channelId": "[variables('teamsChannelID')]",
+                                                                    "groupId": "[variables('teamsGroupID')]"
+                                                                }
+                                                            },
+                                                            "host": {
+                                                                "connection": {
+                                                                    "name": "@parameters('$connections')['teams']['connectionId']"
+                                                                }
+                                                            },
+                                                            "method": "post",
+                                                            "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            "expression": "@body('Get_admin_approval_in_Teams_after_reminder_delay')?['data']?['result']",
+                                            "type": "Switch"
+                                        }
+                                    }
+                                }
+                            },
+                            "default": {
+                                "actions": {
+                                    "Post_Error_message_default_1": {
+                                        "runAfter": {},
+                                        "type": "ApiConnection",
+                                        "inputs": {
+                                            "body": {
+                                                "messageBody": "{\n    \"type\": \"AdaptiveCard\",\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.2\",\n    \"body\": [\n        {\n            \"type\": \"TextBlock\",\n            \"text\": \"An Error happened - We didn't understand your answer - Please check your Azure Logic App flow for more details\",\n            \"wrap\": true,\n            \"weight\": \"bolder\",\n            \"color\": \"attention\"\n        }\n    ]\n}",
+                                                "recipient": {
+                                                    "channelId": "[variables('teamsChannelID')]",
+                                                    "groupId": "[variables('teamsGroupID')]"
+                                                }
+                                            },
+                                            "host": {
+                                                "connection": {
+                                                    "name": "@parameters('$connections')['teams']['connectionId']"
+                                                }
+                                            },
+                                            "method": "post",
+                                            "path": "/v1.0/teams/conversation/adaptivecard/poster/Flow bot/location/@{encodeURIComponent('Channel')}"
+                                        }
+                                    }
+                                }
+                            },
+                            "expression": "@body('Get_admin_approval_in_Teams')?['data']?['result']",
+                            "type": "Switch"
+                        }
+                    },
+                    "outputs": {
+                    }
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "azureeventgrid": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', 'AzLA-Connector-EventGrid')]",
+                                "connectionName": "AzLA-Connector-EventGrid",
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', 'azureeventgrid')]"
+                            },
+                            "keyvault": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', 'AzLA-Connector-KeyVault')]",
+                                "connectionName": "AzLA-Connector-KeyVault",
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', 'keyvault')]"
+                            },
+                            "teams": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', 'AzLA-Connector-Teams')]",
+                                "connectionName": "AzLA-Connector-Teams",
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', 'teams')]"
+                            }
+                        }
+                    }
+                }
+            },
+            "dependsOn" :[
+                "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]",
+                "[resourceId('Microsoft.Web/connections', variables('connectionNameKeyVault'))]",
+                "[resourceId('Microsoft.Web/connections', variables('connectionNameTeams'))]",
+                "[resourceId('Microsoft.Web/connections', variables('connectionNameEventGrid'))]",
+                "[resourceId('Microsoft.Web/sites', variables('functionAppName'))]"
+            ]
+        }                             
+    ],
+    "outputs": {
+        "AzFuncPrincipalId": {
+            "type": "string",
+            "value": "[reference(resourceId('Microsoft.Web/sites', variables('functionAppName')), '2020-12-01', 'Full').identity.principalId]"
+        },
+        "AzKeyVaultName": {
+            "type": "string",
+            "value": "[variables('keyVaultName')]"
+        }
+    }
+}

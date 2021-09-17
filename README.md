@@ -11,6 +11,14 @@ Here are the key features provided by the solution :
 - Notifies users directly into Microsoft Teams to confirm next steps (confirm roll-out / postpone and set a reminder / cancel the operation)
 - Automaticaly roll-out the new-secret to Azure web sites 
 
+<p align="center">
+    <img src="./Media/teams-notification-secret-rotation.jpg" alt="Microsoft Teams notification for secret rotation" width="400"/>
+</p>
+
+<p align="center">
+    <img src="./Media/teams-notification-jobs-done.jpg" alt="Job's done" width="400"/>
+</p>
+
 ## Solution overview
 
 ### High Level Design

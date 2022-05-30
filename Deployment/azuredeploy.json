@@ -15,7 +15,7 @@
             "metadata": {
                 "description": "The URL to the GitHub repository to deploy."
             },
-            "defaultValue": "https://github.com/timoleo23/secretManager.git"
+            "defaultValue": "https://github.com/Azure/AzureAD-AppSecretManager.git"
         },
         "gitBranch": {
             "type": "string",
